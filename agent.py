@@ -70,11 +70,51 @@ def agent(observation, configuration):
 
     resource_tiles = find_resources(game_state)
     
+    # Fuel only gets used up at night so we need enough to last the nights
+    new_city = True
+    
+    for city in player.cities.values():
+        req_fuel = 90 * city.get_light_upkeep() # There are 90 nights total
+
+        if city.fuel < req_fuel:
+            # let's not build a new one yet
+            new_city = False
+            
+        # Do stuff with our citytiles
+        for tile in city.citytiles:
+            if tile.can_act():
+                
+                # If we have fewer units than cities create a unit
+                if len(player.units) < sum([len(city.citytiles) for city in player.cities.values()]):
+                    action = tile.build_worker()
+                    actions.append(action)
+                
+                # Otherwise do research
+                else:
+                    action = tile.research()
+                    actions.append(action)
+    
     for unit in player.units:
         # if the unit is a worker (can mine resources) and can perform an action this turn
         if unit.is_worker() and unit.can_act():
+            
+            # Find the closest city tile and its distance from the unit
+            closest_city_tile = find_closest_city_tile(unit.pos, player)
+            d = unit.pos.distance_to(closest_city_tile.pos)
+            
+            if observation["step"] % 40 >= 26: #  FIX THIS LATER. Make it go home properly.
+                action = unit.move(unit.pos.direction_to(closest_city_tile.pos))
+                actions.append(action)
+                continue
+                
+            
+            if (unit.can_build(game_state.map) and new_city and d==1) or closest_city_tile is None:
+                action = unit.build_city()
+                actions.append(action)
+                
+            
             # we want to mine only if there is space left in the worker's cargo
-            if unit.get_cargo_space_left() > 0:
+            elif unit.get_cargo_space_left() > 0:
                 # find the closest resource if it exists to this unit
                 closest_resource_tile = find_closest_resources(unit.pos, player, resource_tiles)
                 if closest_resource_tile is not None:
@@ -83,10 +123,11 @@ def agent(observation, configuration):
                     actions.append(action)
             else:
                 # find the closest citytile and move the unit towards it to drop resources to a citytile to fuel the city
-                closest_city_tile = find_closest_city_tile(unit.pos, player)
                 if closest_city_tile is not None:
                     # create a move action to move this unit in the direction of the closest resource tile and add to our actions list
                     action = unit.move(unit.pos.direction_to(closest_city_tile.pos))
                     actions.append(action)
+                    
+    
     
     return actions
