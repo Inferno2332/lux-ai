@@ -5,6 +5,7 @@ from lux.constants import Constants
 from lux.game_constants import GAME_CONSTANTS
 from lux import annotate
 import math
+import random
 import sys
 
 ### Define helper functions
@@ -48,6 +49,11 @@ def find_closest_city_tile(pos, player):
                     closest_city_tile = city_tile
     return closest_city_tile
 
+def random_dir_except(direc):
+    li = ['n', 's', 'e', 'w', 'c']
+    li.remove(direc)
+    return random.choice(li)
+
 game_state = None
 def agent(observation, configuration):
     global game_state
@@ -74,7 +80,7 @@ def agent(observation, configuration):
     new_city = True
     
     for city in player.cities.values():
-        req_fuel = 90 * city.get_light_upkeep() # There are 90 nights total
+        req_fuel = 20 * city.get_light_upkeep() # There are 90 nights total
 
         if city.fuel < req_fuel:
             # let's not build a new one yet
@@ -82,17 +88,24 @@ def agent(observation, configuration):
             
         # Do stuff with our citytiles
         for tile in city.citytiles:
+            pending = 0
             if tile.can_act():
                 
                 # If we have fewer units than cities create a unit
-                if len(player.units) < sum([len(city.citytiles) for city in player.cities.values()]):
+                if len(player.units) + pending < sum([len(city.citytiles) for city in player.cities.values()]):
                     action = tile.build_worker()
                     actions.append(action)
+                    pending += 1
                 
                 # Otherwise do research
                 else:
                     action = tile.research()
                     actions.append(action)
+
+###########################################################                    
+
+    # Where units plan to go
+    targets = set()
     
     for unit in player.units:
         # if the unit is a worker (can mine resources) and can perform an action this turn
@@ -103,8 +116,19 @@ def agent(observation, configuration):
             d = unit.pos.distance_to(closest_city_tile.pos)
             
             if observation["step"] % 40 >= 26: #  FIX THIS LATER. Make it go home properly.
-                action = unit.move(unit.pos.direction_to(closest_city_tile.pos))
-                actions.append(action)
+                direction = unit.pos.direction_to(closest_city_tile.pos)
+                target = unit.pos.translate(direction, 1)
+                    
+                if (target.x, target.y) in targets:
+
+                    action = unit.move('c')
+                    actions.append(action)
+
+                else:
+                    targets.add((target.x, target.y))
+                    action = unit.move(direction)
+                    actions.append(action)
+
                 continue
                 
             
@@ -119,14 +143,33 @@ def agent(observation, configuration):
                 closest_resource_tile = find_closest_resources(unit.pos, player, resource_tiles)
                 if closest_resource_tile is not None:
                     # create a move action to move this unit in the direction of the closest resource tile and add to our actions list
-                    action = unit.move(unit.pos.direction_to(closest_resource_tile.pos))
-                    actions.append(action)
+                    direction = unit.pos.direction_to(closest_resource_tile.pos)
+                    target = unit.pos.translate(direction, 1)
+                    
+                    if (target.x, target.y) in targets:
+                        
+                        action = unit.move('c')
+                        actions.append(action)
+                        
+                    else:
+                        targets.add((target.x, target.y))
+                        action = unit.move(direction)
+                        actions.append(action)
             else:
                 # find the closest citytile and move the unit towards it to drop resources to a citytile to fuel the city
                 if closest_city_tile is not None:
                     # create a move action to move this unit in the direction of the closest resource tile and add to our actions list
-                    action = unit.move(unit.pos.direction_to(closest_city_tile.pos))
-                    actions.append(action)
+                    direction = unit.pos.direction_to(closest_city_tile.pos)
+                    target = unit.pos.translate(direction, 1)
+                    
+                    if (target.x, target.y) in targets:
+                        action = unit.move('c')
+                        actions.append(action)
+                        
+                    else:
+                        targets.add((target.x, target.y))
+                        action = unit.move(direction)
+                        actions.append(action)
                     
     
     
