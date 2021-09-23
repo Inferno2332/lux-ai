@@ -49,10 +49,16 @@ def find_closest_city_tile(pos, player):
                     closest_city_tile = city_tile
     return closest_city_tile
 
-def random_dir_except(direc):
-    li = ['n', 's', 'e', 'w', 'c']
-    li.remove(direc)
-    return random.choice(li)
+def random_free(unit, banned):
+    dirs = ['n', 's', 'e', 'w']
+    random.shuffle(dirs)
+    
+    for direc in dirs:
+        new_target = unit.pos.translate(direc, 1)
+        if not((new_target.x, new_target.y) in banned):
+            return direc
+        
+    return 'c'
 
 game_state = None
 def agent(observation, configuration):
@@ -76,24 +82,29 @@ def agent(observation, configuration):
 
     resource_tiles = find_resources(game_state)
     
+    # BANNED TILES
+    banned = set()
+    
     # Fuel only gets used up at night so we need enough to last the nights
+    nights_left = 10 * (9 - observation["step"] // 40) # (This wasn't used, but i'm leaving it here)
     new_city = True
     
     for city in player.cities.values():
-        req_fuel = 20 * city.get_light_upkeep() # There are 90 nights total
+        req_fuel = nights_left * city.get_light_upkeep() # There are 90 nights total
 
         if city.fuel < req_fuel:
             # let's not build a new one yet
             new_city = False
             
         # Do stuff with our citytiles
+        pending = 0
         for tile in city.citytiles:
-            pending = 0
             if tile.can_act():
                 
                 # If we have fewer units than cities create a unit
                 if len(player.units) + pending < sum([len(city.citytiles) for city in player.cities.values()]):
                     action = tile.build_worker()
+                    banned.add((tile.pos.x, tile.pos.y))
                     actions.append(action)
                     pending += 1
                 
@@ -104,8 +115,10 @@ def agent(observation, configuration):
 
 ###########################################################                    
 
-    # Where units plan to go
-    targets = set()
+    # Opponents citytiles are banned
+    for city in opponent.cities.values():
+        for city_tile in city.citytiles:
+            banned.add((city_tile.pos.x, city_tile.pos.y))
     
     for unit in player.units:
         # if the unit is a worker (can mine resources) and can perform an action this turn
@@ -113,46 +126,53 @@ def agent(observation, configuration):
             
             # Find the closest city tile and its distance from the unit
             closest_city_tile = find_closest_city_tile(unit.pos, player)
-            d = unit.pos.distance_to(closest_city_tile.pos)
+            closest_resource_tile = find_closest_resources(unit.pos, player, resource_tiles)
+            
+            d_city = unit.pos.distance_to(closest_city_tile.pos)
+            d_resource = unit.pos.distance_to(closest_resource_tile.pos) # (This wasn't used, but i'm leaving it here)
+            
+            if observation["step"] % 40 >= 30:
+                continue
             
             if observation["step"] % 40 >= 26: #  FIX THIS LATER. Make it go home properly.
                 direction = unit.pos.direction_to(closest_city_tile.pos)
                 target = unit.pos.translate(direction, 1)
                     
-                if (target.x, target.y) in targets:
+                if (target.x, target.y) in banned:
 
-                    action = unit.move('c')
+                    action = unit.move(random_free(unit, banned))
                     actions.append(action)
 
                 else:
-                    targets.add((target.x, target.y))
+                    banned.add((target.x, target.y))
                     action = unit.move(direction)
                     actions.append(action)
 
                 continue
                 
             
-            if (unit.can_build(game_state.map) and new_city and d==1) or closest_city_tile is None:
+            if (unit.can_build(game_state.map) and new_city and (d_city==1)) or closest_city_tile is None:
                 action = unit.build_city()
+                banned.add((unit.pos.x, unit.pos.y))
                 actions.append(action)
                 
             
             # we want to mine only if there is space left in the worker's cargo
             elif unit.get_cargo_space_left() > 0:
                 # find the closest resource if it exists to this unit
-                closest_resource_tile = find_closest_resources(unit.pos, player, resource_tiles)
+                
                 if closest_resource_tile is not None:
                     # create a move action to move this unit in the direction of the closest resource tile and add to our actions list
                     direction = unit.pos.direction_to(closest_resource_tile.pos)
                     target = unit.pos.translate(direction, 1)
                     
-                    if (target.x, target.y) in targets:
+                    if (target.x, target.y) in banned:
                         
-                        action = unit.move('c')
+                        action = unit.move(random_free(unit, banned))
                         actions.append(action)
                         
                     else:
-                        targets.add((target.x, target.y))
+                        banned.add((target.x, target.y))
                         action = unit.move(direction)
                         actions.append(action)
             else:
@@ -162,12 +182,12 @@ def agent(observation, configuration):
                     direction = unit.pos.direction_to(closest_city_tile.pos)
                     target = unit.pos.translate(direction, 1)
                     
-                    if (target.x, target.y) in targets:
-                        action = unit.move('c')
+                    if (target.x, target.y) in banned:
+                        action = unit.move(random_free(unit, banned))
                         actions.append(action)
                         
                     else:
-                        targets.add((target.x, target.y))
+                        banned.add((target.x, target.y))
                         action = unit.move(direction)
                         actions.append(action)
                     
