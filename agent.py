@@ -5,7 +5,6 @@ from lux.constants import Constants
 from lux.game_constants import GAME_CONSTANTS
 from lux import annotate
 import math
-import random
 import sys
 
 ### Define helper functions
@@ -49,16 +48,47 @@ def find_closest_city_tile(pos, player):
                     closest_city_tile = city_tile
     return closest_city_tile
 
-def random_free(unit, banned):
+def random_free(unit, targets):
     dirs = ['n', 's', 'e', 'w']
     random.shuffle(dirs)
     
     for direc in dirs:
         new_target = unit.pos.translate(direc, 1)
-        if not((new_target.x, new_target.y) in banned):
-            return direc
+        if (new_target not in targets) and (new_target.x < game_state.map_width) and (new_target.y < game_state.map_height):
+            banned.append(new_target)
+            return new_target, direc
         
-    return 'c'
+    return unit.pos, 'c'
+
+def collision_avoider(targets, target, actions, action, unit, city_tiles):
+    #Detects if proposed move will lead to collision. If so, dont move.
+    
+    #Input: targets, (proposed) target, action, (proposed) action, units.
+    
+    #Output: action
+    
+    if target in targets and target not in city_tiles:
+        #Sit still if staying is not target
+        if unit.pos not in targets:
+            action= unit.move('c')   
+            actions.append(action)
+            
+            if unit.pos not in city_tiles:
+                targets.append(unit.pos)
+        
+        #Else move in a random direction to not collide
+        else:
+            target, direc= random_free(unit, targets)
+            action= unit.move(direc)
+            
+            actions.append(action)
+            targets.append(target)      
+            
+    else:
+        actions.append(action)
+        targets.append(target)
+    
+    return targets, actions
 
 game_state = None
 def agent(observation, configuration):
@@ -82,43 +112,83 @@ def agent(observation, configuration):
 
     resource_tiles = find_resources(game_state)
     
-    # BANNED TILES
-    banned = set()
-    
     # Fuel only gets used up at night so we need enough to last the nights
-    nights_left = 10 * (9 - observation["step"] // 40) # (This wasn't used, but i'm leaving it here)
+    
+    #Default= build new cities unless not enough fuel...
     new_city = True
     
-    for city in player.cities.values():
-        req_fuel = nights_left * city.get_light_upkeep() # There are 90 nights total
+    #Keep track of turn no. and day night cycle.
+    turn= game_state.turn
+    
+    if turn%40 >30:
+        night= True
+        turns_to_night=0
+    else:
+        night=False
+        turns_to_night = 30- turn%40
+    
+    #Copy resource tiles 
+    resource_tiles_copy=resource_tiles.copy()
+    
+    #Keep a list of target locations
+    prev_loc=[unit.pos for unit in player.units]
+    
+    #Include not acting workers 
+    targets=[]
+    
+    for unit in player.units:
+        if unit.can_act()== False:
+            targets.append(unit.pos)
+    
+    #Keep track of player/ opponent city tiles
+    city_tiles=[]
+    
+    for city in player.cities:
+        
+        for tile in player.cities[city].citytiles:
+            city_tiles.append(tile.pos)
+    
+    opp_city_tiles=[]
 
+    for city in opponent.cities:
+        for tile in opponent.cities[city].citytiles:
+            opp_city_tiles.append(tile.pos)
+    
+    research_points=player.research_points
+    
+    #add targets to banned list
+    targets= targets + opp_city_tiles
+        
+    for city in player.cities.values():
+        #Required fuel to build new city should be a function of no. turns to night and expected fuel gain during the day
+        
+        req_fuel = (10- turns_to_night*0.3)//1 * city.get_light_upkeep() 
+        
         if city.fuel < req_fuel:
             # let's not build a new one yet
             new_city = False
             
         # Do stuff with our citytiles
-        pending = 0
         for tile in city.citytiles:
             if tile.can_act():
                 
                 # If we have fewer units than cities create a unit
-                if len(player.units) + pending < sum([len(city.citytiles) for city in player.cities.values()]):
+                if len(player.units) < sum([len(city.citytiles) for city in player.cities.values()]):
                     action = tile.build_worker()
-                    banned.add((tile.pos.x, tile.pos.y))
                     actions.append(action)
-                    pending += 1
                 
                 # Otherwise do research
-                else:
+                elif research_points <200:
                     action = tile.research()
                     actions.append(action)
-
-###########################################################                    
-
-    # Opponents citytiles are banned
-    for city in opponent.cities.values():
-        for city_tile in city.citytiles:
-            banned.add((city_tile.pos.x, city_tile.pos.y))
+                    research_points+=1
+                
+                #Else build worker or cart?
+                
+                else:
+                    action = tile.build_worker()
+                    actions.append(action)
+                    
     
     for unit in player.units:
         # if the unit is a worker (can mine resources) and can perform an action this turn
@@ -126,71 +196,83 @@ def agent(observation, configuration):
             
             # Find the closest city tile and its distance from the unit
             closest_city_tile = find_closest_city_tile(unit.pos, player)
-            closest_resource_tile = find_closest_resources(unit.pos, player, resource_tiles)
+            d = unit.pos.distance_to(closest_city_tile.pos)
             
-            d_city = unit.pos.distance_to(closest_city_tile.pos)
-            d_resource = unit.pos.distance_to(closest_resource_tile.pos) # (This wasn't used, but i'm leaving it here)
+            late_game=340
             
-            if observation["step"] % 40 >= 30:
+            if ( 5 > turns_to_night and turn <late_game)  or night==True: 
+                
+                #  If nearing night time, head to city
+                action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
+                
+                direction= unit.pos.direction_to(closest_city_tile.pos)
+                
+                target= unit.pos.translate(direction,1)
+                
+                targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
+                
                 continue
-            
-            if observation["step"] % 40 >= 26: #  FIX THIS LATER. Make it go home properly.
-                direction = unit.pos.direction_to(closest_city_tile.pos)
-                target = unit.pos.translate(direction, 1)
+                
+            #Special late game rules
+                
+            if late_game < turn < 350 and unit.can_build(game_state.map) and d >0:
                     
-                if (target.x, target.y) in banned:
-
-                    action = unit.move(random_free(unit, banned))
-                    actions.append(action)
-
-                else:
-                    banned.add((target.x, target.y))
-                    action = unit.move(direction)
-                    actions.append(action)
-
-                continue
+                    action = unit.build_city()
+                    actions.append(action)                              
+                    targets.append(unit.pos)
+                    
+                    city_tiles.append(unit.pos)
+                                              
                 
+            elif 5 > turns_to_night:
+                    action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
+                
+                    direction= unit.pos.direction_to(closest_city_tile.pos)
+                    
+                    target= unit.pos.translate(direction,1)
+                
+                    targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
+                
+                    continue
             
-            if (unit.can_build(game_state.map) and new_city and (d_city==1)) or closest_city_tile is None:
-                action = unit.build_city()
-                banned.add((unit.pos.x, unit.pos.y))
-                actions.append(action)
-                
+            elif unit.can_build(game_state.map) and ((new_city and d > 0) or closest_city_tile is None):
+                    action = unit.build_city()
+                    actions.append(action)
+                    
+                    targets.append(unit.pos)
             
             # we want to mine only if there is space left in the worker's cargo
             elif unit.get_cargo_space_left() > 0:
                 # find the closest resource if it exists to this unit
                 
+                closest_resource_tile = find_closest_resources(unit.pos, player, resource_tiles_copy)
+                
+                i= resource_tiles_copy.index(closest_resource_tile)
+                
                 if closest_resource_tile is not None:
                     # create a move action to move this unit in the direction of the closest resource tile and add to our actions list
-                    direction = unit.pos.direction_to(closest_resource_tile.pos)
-                    target = unit.pos.translate(direction, 1)
+                    action = unit.move(unit.pos.direction_to(closest_resource_tile.pos))
                     
-                    if (target.x, target.y) in banned:
-                        
-                        action = unit.move(random_free(unit, banned))
-                        actions.append(action)
-                        
-                    else:
-                        banned.add((target.x, target.y))
-                        action = unit.move(direction)
-                        actions.append(action)
+                    #insert code to check if action will lead to collision... if so then say in center 
+                    direction= unit.pos.direction_to(closest_city_tile.pos)
+                
+                    target= unit.pos.translate(direction,1)
+                
+                    targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
+                    
+                del resource_tiles_copy[i]
+                #Dont let agents have the same closest resource (dont compete and collide, hopefully)
+
             else:
                 # find the closest citytile and move the unit towards it to drop resources to a citytile to fuel the city
                 if closest_city_tile is not None:
                     # create a move action to move this unit in the direction of the closest resource tile and add to our actions list
-                    direction = unit.pos.direction_to(closest_city_tile.pos)
-                    target = unit.pos.translate(direction, 1)
+                    action = unit.move(unit.pos.direction_to(closest_city_tile.pos))
                     
-                    if (target.x, target.y) in banned:
-                        action = unit.move(random_free(unit, banned))
-                        actions.append(action)
-                        
-                    else:
-                        banned.add((target.x, target.y))
-                        action = unit.move(direction)
-                        actions.append(action)
+                    direction= unit.pos.direction_to(closest_city_tile.pos)
+                
+                    target= unit.pos.translate(direction,1)
+                
+                    targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
                     
-    
-    
     return actions
