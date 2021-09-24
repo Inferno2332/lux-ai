@@ -162,7 +162,7 @@ def agent(observation, configuration):
     for city in player.cities.values():
         #Required fuel to build new city should be a function of no. turns to night and expected fuel gain during the day
         
-        req_fuel = (10- turns_to_night*0.3)//1 * city.get_light_upkeep() 
+        req_fuel = (10- turns_to_night*0.33)//1 * city.get_light_upkeep() 
         
         if city.fuel < req_fuel:
             # let's not build a new one yet
@@ -198,9 +198,9 @@ def agent(observation, configuration):
             closest_city_tile = find_closest_city_tile(unit.pos, player)
             d = unit.pos.distance_to(closest_city_tile.pos)
             
-            late_game=340
+            late_game=330
             
-            if ( 5 > turns_to_night and turn <late_game)  or night==True: 
+            if ( 5 > turns_to_night and (turn <late_game or turn >350) )  or night==True: 
                 
                 #  If nearing night time, head to city
                 action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
@@ -215,7 +215,7 @@ def agent(observation, configuration):
                 
             #Special late game rules
                 
-            if late_game < turn < 350 and unit.can_build(game_state.map) and d >0:
+            if late_game < turn < 350 and unit.can_build(game_state.map) and d==1:
                     
                     action = unit.build_city()
                     actions.append(action)                              
@@ -247,9 +247,10 @@ def agent(observation, configuration):
                 
                 closest_resource_tile = find_closest_resources(unit.pos, player, resource_tiles_copy)
                 
-                i= resource_tiles_copy.index(closest_resource_tile)
-                
                 if closest_resource_tile is not None:
+                    
+                    i= resource_tiles_copy.index(closest_resource_tile)
+                    
                     # create a move action to move this unit in the direction of the closest resource tile and add to our actions list
                     action = unit.move(unit.pos.direction_to(closest_resource_tile.pos))
                     
@@ -260,8 +261,18 @@ def agent(observation, configuration):
                 
                     targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
                     
-                del resource_tiles_copy[i]
-                #Dont let agents have the same closest resource (dont compete and collide, hopefully)
+                    del resource_tiles_copy[i]
+                    #Dont let agents have the same closest resource (dont compete and collide, hopefully)
+                
+                else:
+                    #no resource? go home
+                    action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
+                
+                    direction= unit.pos.direction_to(closest_city_tile.pos)
+                
+                    target= unit.pos.translate(direction,1)
+                
+                    targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
 
             else:
                 # find the closest citytile and move the unit towards it to drop resources to a citytile to fuel the city
