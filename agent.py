@@ -6,6 +6,7 @@ from lux.game_constants import GAME_CONSTANTS
 from lux import annotate
 import math
 import sys
+import random 
 
 ### Define helper functions
 
@@ -55,26 +56,50 @@ def random_free(unit, targets):
     for direc in dirs:
         new_target = unit.pos.translate(direc, 1)
         if (new_target not in targets) and (new_target.x < game_state.map_width) and (new_target.y < game_state.map_height):
-            banned.append(new_target)
+            targets.append(new_target)
             return new_target, direc
         
     return unit.pos, 'c'
 
-def collision_avoider(targets, target, actions, action, unit, city_tiles):
+def inverse(direction):
+    #input: direction
+    #output: opposite direction
+
+    if direction== 'e':
+        return('w')
+
+    if direction== 'w':
+        return('e')
+
+    if direction== 'n':
+        return('s')
+    
+    if direction== 's':
+        return('n')
+    
+    if direction== 'c':
+        dirs = ['n', 's', 'e', 'w']
+        return(random.choice(dirs))
+
+def collision_avoider(targets, target, actions, action, unit,city_tiles):
     #Detects if proposed move will lead to collision. If so, dont move.
     
     #Input: targets, (proposed) target, action, (proposed) action, units.
     
     #Output: action
     
-    if target in targets and target not in city_tiles:
+    if target in targets:
         #Sit still if staying is not target
         if unit.pos not in targets:
-            action= unit.move('c')   
-            actions.append(action)
-            
-            if unit.pos not in city_tiles:
-                targets.append(unit.pos)
+            if unit.can_build(game_state.map):
+                action= unit.build_city()   
+                actions.append(action)
+                city_tiles.append(unit.pos)
+
+            else:
+                action= unit.move('c')  
+                actions.append(action)
+
         
         #Else move in a random direction to not collide
         else:
@@ -89,6 +114,7 @@ def collision_avoider(targets, target, actions, action, unit, city_tiles):
         targets.append(target)
     
     return targets, actions
+    
 
 game_state = None
 def agent(observation, configuration):
@@ -158,15 +184,21 @@ def agent(observation, configuration):
     
     #add targets to banned list
     targets= targets + opp_city_tiles
-        
+    
+    total_req_fuel=0
+    
+    total_city_fuel=0
+
+    #non-empty tiles
+    non_empty= resource_tiles + city_tiles + opp_city_tiles
+
     for city in player.cities.values():
         #Required fuel to build new city should be a function of no. turns to night and expected fuel gain during the day
         
-        req_fuel = (10- turns_to_night*0.33)//1 * city.get_light_upkeep() 
+        req_fuel = (10- turns_to_night*0.2)//1 * city.get_light_upkeep()
+        total_req_fuel+= req_fuel
         
-        if city.fuel < req_fuel:
-            # let's not build a new one yet
-            new_city = False
+        total_city_fuel+=city.fuel
             
         # Do stuff with our citytiles
         for tile in city.citytiles:
@@ -188,7 +220,9 @@ def agent(observation, configuration):
                 else:
                     action = tile.build_worker()
                     actions.append(action)
-                    
+    
+    if total_req_fuel < total_city_fuel:
+        new_city==False
     
     for unit in player.units:
         # if the unit is a worker (can mine resources) and can perform an action this turn
@@ -196,22 +230,34 @@ def agent(observation, configuration):
             
             # Find the closest city tile and its distance from the unit
             closest_city_tile = find_closest_city_tile(unit.pos, player)
-            d = unit.pos.distance_to(closest_city_tile.pos)
+
+            if closest_city_tile is not None:
+                d = unit.pos.distance_to(closest_city_tile.pos)
+            else:
+                d=32
             
             late_game=330
             
-            if ( 5 > turns_to_night and (turn <late_game or turn >350) )  or night==True: 
+            if ( 5 > turns_to_night and (turn <late_game or turn >350))  or night==True  : 
                 
+                if closest_city_tile is not None:
                 #  If nearing night time, head to city
-                action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
+                    action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
                 
-                direction= unit.pos.direction_to(closest_city_tile.pos)
+                    direction= unit.pos.direction_to(closest_city_tile.pos)
                 
-                target= unit.pos.translate(direction,1)
+                    target= unit.pos.translate(direction,1)
                 
-                targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
+                    targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
                 
-                continue
+                    continue
+
+                else:
+                    action = unit.move('c')
+                    actions.append(action)
+
+                    target.append(unit.pos) 
+
                 
             #Special late game rules
                 
@@ -225,6 +271,8 @@ def agent(observation, configuration):
                                               
                 
             elif 5 > turns_to_night:
+
+                if closest_city_tile is not None:
                     action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
                 
                     direction= unit.pos.direction_to(closest_city_tile.pos)
@@ -234,12 +282,40 @@ def agent(observation, configuration):
                     targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
                 
                     continue
-            
-            elif unit.can_build(game_state.map) and ((new_city and d > 0) or closest_city_tile is None):
+                else:
+                    action = unit.move('c')
+                    actions.append(action)
+
+                    target.append(unit.pos)
+
+            # Special early game rules
+            if 2 < turn < 20 and turn % 3 == 0:
+                #build cities 
+                if unit.can_build(game_state.map):
                     action = unit.build_city()
                     actions.append(action)
-                    
                     targets.append(unit.pos)
+                    
+                elif unit.pos not in city_tiles:
+                    direction= unit.pos.direction_to(closest_city_tile.pos)
+                    
+                    direction= inverse(direction)
+
+                    target= unit.pos.translate(direction,1)
+
+                    action = unit.move(direction)
+
+                    targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
+            
+            elif unit.can_build(game_state.map):
+                
+                if new_city ==True:
+                    action = unit.build_city()
+                    actions.append(action)
+                    targets.append(unit.pos)
+                    
+                else:
+                    continue
             
             # we want to mine only if there is space left in the worker's cargo
             elif unit.get_cargo_space_left() > 0:
@@ -266,13 +342,23 @@ def agent(observation, configuration):
                 
                 else:
                     #no resource? go home
-                    action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
+
+                    if closest_city_tile is not None:
+
+                        action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
                 
-                    direction= unit.pos.direction_to(closest_city_tile.pos)
+                        direction= unit.pos.direction_to(closest_city_tile.pos)
                 
-                    target= unit.pos.translate(direction,1)
+                        target= unit.pos.translate(direction,1)
                 
-                    targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
+                        targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
+                    
+                    else:
+                        action = unit.move('c')
+                        actions.append(action)
+
+                        target.append(unit.pos)
+
 
             else:
                 # find the closest citytile and move the unit towards it to drop resources to a citytile to fuel the city

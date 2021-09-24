@@ -7,13 +7,11 @@ from kaggle_environments import make
 
 def sim_battle(agent0, agent1, sample_size= 100):
     # Simulates battles between two agents
-    #  returns W/ D /L as a dict
+    #  returns W/ D /L as a dict and win rate
 
     wins, draw, loss= 0, 0 ,0
 
     rng= np.random.randint(1, 10**7, size=sample_size)
-
-    progress=0
 
     for seed in rng:
 
@@ -30,5 +28,7 @@ def sim_battle(agent0, agent1, sample_size= 100):
             draw+=1
         else:
             loss+=1
-    
-    return {"Wins": wins, "Draws" :draw, "Losses": loss}
+        
+        win_rate= (wins+ draw*0.5)/sample_size
+
+    return {"Wins": wins, "Draws" :draw, "Losses": loss, "Win rate": win_rate}
