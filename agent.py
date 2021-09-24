@@ -49,15 +49,23 @@ def find_closest_city_tile(pos, player):
                     closest_city_tile = city_tile
     return closest_city_tile
 
-def random_free(unit, banned):
-    dirs = ['n', 's', 'e', 'w']
-    random.shuffle(dirs)
+def random_free(unit, banned, direc):
+    d1 = ['n', 's']
+    d2 = ['e', 'w']
+    if direc in d1:
+        d1.remove(direc)
+        dirs = d2 + ['c'] + d1
+    elif direc in d2:
+        d2.remove(direc)
+        dirs = d1 + ['c'] + d2
+    else:
+        dirs = ['n', 's', 'e', 'w']
     
     for direc in dirs:
         new_target = unit.pos.translate(direc, 1)
-        if not((new_target.x, new_target.y) in banned):
+        if not((new_target.x, new_target.y) in banned) and (new_target.x < game_state.map_width) and (new_target.y < game_state.map_height):
+            banned.add((new_target.x, new_target.y))
             return direc
-        
     return 'c'
 
 game_state = None
@@ -82,15 +90,12 @@ def agent(observation, configuration):
 
     resource_tiles = find_resources(game_state)
     
-    # BANNED TILES
-    banned = set()
-    
     # Fuel only gets used up at night so we need enough to last the nights
-    nights_left = 10 * (9 - observation["step"] // 40) # (This wasn't used, but i'm leaving it here)
+    nights_left = 10 * (9 - observation["step"] // 40)
     new_city = True
     
     for city in player.cities.values():
-        req_fuel = nights_left * city.get_light_upkeep() # There are 90 nights total
+        req_fuel = min(20, nights_left) * city.get_light_upkeep() # There are 90 nights total
 
         if city.fuel < req_fuel:
             # let's not build a new one yet
@@ -104,7 +109,6 @@ def agent(observation, configuration):
                 # If we have fewer units than cities create a unit
                 if len(player.units) + pending < sum([len(city.citytiles) for city in player.cities.values()]):
                     action = tile.build_worker()
-                    banned.add((tile.pos.x, tile.pos.y))
                     actions.append(action)
                     pending += 1
                 
@@ -115,6 +119,8 @@ def agent(observation, configuration):
 
 ###########################################################                    
 
+    banned = set()
+    
     # Opponents citytiles are banned
     for city in opponent.cities.values():
         for city_tile in city.citytiles:
@@ -126,13 +132,7 @@ def agent(observation, configuration):
             
             # Find the closest city tile and its distance from the unit
             closest_city_tile = find_closest_city_tile(unit.pos, player)
-            closest_resource_tile = find_closest_resources(unit.pos, player, resource_tiles)
-            
-            d_city = unit.pos.distance_to(closest_city_tile.pos)
-            d_resource = unit.pos.distance_to(closest_resource_tile.pos) # (This wasn't used, but i'm leaving it here)
-            
-            if observation["step"] % 40 >= 30:
-                continue
+            d = unit.pos.distance_to(closest_city_tile.pos)
             
             if observation["step"] % 40 >= 26: #  FIX THIS LATER. Make it go home properly.
                 direction = unit.pos.direction_to(closest_city_tile.pos)
@@ -140,7 +140,7 @@ def agent(observation, configuration):
                     
                 if (target.x, target.y) in banned:
 
-                    action = unit.move(random_free(unit, banned))
+                    action = unit.move(random_free(unit, banned, direction))
                     actions.append(action)
 
                 else:
@@ -151,7 +151,7 @@ def agent(observation, configuration):
                 continue
                 
             
-            if (unit.can_build(game_state.map) and new_city and (d_city==1)) or closest_city_tile is None:
+            if (unit.can_build(game_state.map) and new_city and d==1) or closest_city_tile is None:
                 action = unit.build_city()
                 banned.add((unit.pos.x, unit.pos.y))
                 actions.append(action)
@@ -160,7 +160,7 @@ def agent(observation, configuration):
             # we want to mine only if there is space left in the worker's cargo
             elif unit.get_cargo_space_left() > 0:
                 # find the closest resource if it exists to this unit
-                
+                closest_resource_tile = find_closest_resources(unit.pos, player, resource_tiles)
                 if closest_resource_tile is not None:
                     # create a move action to move this unit in the direction of the closest resource tile and add to our actions list
                     direction = unit.pos.direction_to(closest_resource_tile.pos)
@@ -168,7 +168,7 @@ def agent(observation, configuration):
                     
                     if (target.x, target.y) in banned:
                         
-                        action = unit.move(random_free(unit, banned))
+                        action = unit.move(random_free(unit, banned, direction))
                         actions.append(action)
                         
                     else:
@@ -183,7 +183,7 @@ def agent(observation, configuration):
                     target = unit.pos.translate(direction, 1)
                     
                     if (target.x, target.y) in banned:
-                        action = unit.move(random_free(unit, banned))
+                        action = unit.move(random_free(unit, banned, direction))
                         actions.append(action)
                         
                     else:
