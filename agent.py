@@ -1,143 +1,449 @@
-# for kaggle-environments
+import sys
+import math
 from lux.game import Game
-from lux.game_map import Cell, RESOURCE_TYPES
+from lux.game_objects import Unit, Player, City, CityTile
+from lux.game_map import Cell, Position, RESOURCE_TYPES
 from lux.constants import Constants
 from lux.game_constants import GAME_CONSTANTS
 from lux import annotate
-import math
-import sys
-import random 
+from enum import Enum
+import random
+from typing import Optional
+from itertools import chain
 
-### Define helper functions
-
-# this snippet finds all resources stored on the map and puts them into a list so we can search over them
-def find_resources(game_state):
-    resource_tiles: list[Cell] = []
-    width, height = game_state.map_width, game_state.map_height
-    for y in range(height):
-        for x in range(width):
-            cell = game_state.map.get_cell(x, y)
-            if cell.has_resource():
-                resource_tiles.append(cell)
-    return resource_tiles
-
-# the next snippet finds the closest resources that we can mine given position on a map
-def find_closest_resources(pos, player, resource_tiles):
-    closest_dist = math.inf
-    closest_resource_tile = None
-    for resource_tile in resource_tiles:
-        # we skip over resources that we can't mine due to not having researched them
-
-        # except... if almost can research uranium eg. research level 198 we want to discover it so we can begin walking there
-        if resource_tile.resource.type == Constants.RESOURCE_TYPES.COAL and (player.research_points < 45 ): continue
-
-        if resource_tile.resource.type == Constants.RESOURCE_TYPES.URANIUM and (player.research_points < 185 ): continue
-
-
-        dist = resource_tile.pos.distance_to(pos)
-        if dist < closest_dist:
-            closest_dist = dist
-            closest_resource_tile = resource_tile
-    return closest_resource_tile
-
-def find_closest_city_tile(pos, player):
-    closest_city_tile = None
-    if len(player.cities) > 0:
-        closest_dist = math.inf
-        # the cities are stored as a dictionary mapping city id to the city object, which has a citytiles field that
-        # contains the information of all citytiles in that city
-        for k, city in player.cities.items():
-            for city_tile in city.citytiles:
-                dist = city_tile.pos.distance_to(pos)
-                if dist < closest_dist:
-                    closest_dist = dist
-                    closest_city_tile = city_tile
-    return closest_city_tile
-
-def random_free(unit, targets,game_state):
-    dirs = ['n', 's', 'e', 'w']
-    random.shuffle(dirs)
-    
-    for direc in dirs:
-        new_target = unit.pos.translate(direc, 1)
-        if (new_target not in targets) and (new_target.x < game_state.map_width) and (new_target.y < game_state.map_height):
-            targets.append(new_target)
-            return new_target, unit.move(direc)
-    
-    if unit.can_build(game_state.map) and turns_to_night > 20:
-        return unit.pos, unit.build_city()
-        
-    return unit.pos, unit.move('c')
-
-def inverse(direction):
-    #input: direction
-    #output: opposite direction
-
-    if direction== 'e':
-        return('w')
-
-    if direction== 'w':
-        return('e')
-
-    if direction== 'n':
-        return('s')
-    
-    if direction== 's':
-        return('n')
-    
-    if direction== 'c':
-        dirs = ['n', 's', 'e', 'w']
-        return(random.choice(dirs))
-
-def collision_avoider(targets, target, actions, action, unit,city_tiles):
-    #Detects if proposed move will lead to collision. If so, dont move.
-    
-    #Input: targets, (proposed) target, action, (proposed) action, units.
-    
-    #Output: action
-    
-    if target in targets:
-        #Sit still if staying is not target
-        if unit.pos not in targets:
-            if unit.can_build(game_state.map):
-                action= unit.build_city()   
-                actions.append(action)
-                city_tiles.append(unit.pos)
-
-            else:
-                action= unit.move('c')  
-                actions.append(action)
-
-        
-        #Else move in a random direction to not collide
-        else:
-            target, action= random_free(unit, targets,game_state)
-            
-            actions.append(action)
-            targets.append(target)      
-            
-    else:
-        actions.append(action)
-        targets.append(target)
-    
-    return targets, actions
-
-def near(unit, targets, dist):
-    
-    near=True
-
-    for target in targets:
-        if target.distance_to(unit.pos) > dist:
-            near=False
-
-    return near
-    
-
+DIRECTIONS = Constants.DIRECTIONS
 game_state = None
+
+
+def log(msg):
+    print(f"Turn {game_state.turn}: {msg}", file=sys.stderr)
+
+
+class UnitGoal(Enum):
+    IDLE = 0  # Unassigned
+    BUILD = 1  # Build at target
+    GATHER = 2  # Gather resources for target
+    RETURN = 3  # Return to target with resources
+
+
+class UnitState():
+
+    def __init__(self, unit_id):
+        self.unit_id = unit_id
+        self._goal = UnitGoal.IDLE
+        self._target = None
+
+    @property
+    def goal(self):
+        return self._goal
+
+    @goal.setter
+    def goal(self, new_goal):
+        self._goal = new_goal
+        log(f"Goal of {self.unit_id} is set to {self._goal}")
+
+    @property
+    def target(self):
+        return self._target
+
+    @target.setter
+    def target(self, new_target):
+        self._target = new_target
+        log(f"Target of {self.unit_id} is set to {self._target}")
+
+
+unit_states: dict[str, UnitState] = dict()  # Keep track of unit state
+
+
+class Cluster():
+    """Resource cluster"""
+
+    def __init__(self, tiles):
+        self.tiles = tiles
+        x_mid = sum(t.x for t in self.tiles) / len(self.tiles)
+        y_mid = sum(t.y for t in self.tiles) / len(self.tiles)
+        self.centroid = Position(round(x_mid), round(y_mid))
+
+
+def pos_is_valid(pos: Position):
+    return 0 <= pos.x < game_state.map_width and 0 <= pos.y < game_state.map_height
+
+
+def neighbours(pos: Position):
+    for direction in [DIRECTIONS.NORTH, DIRECTIONS.WEST, DIRECTIONS.SOUTH, DIRECTIONS.EAST]:
+        new_pos = pos.translate(direction, 1)
+        if pos_is_valid(new_pos):
+            yield new_pos
+
+
+def boundary(region: list[Position]):
+    region_set = set((pos.x, pos.y) for pos in region)
+    bd = set()
+    for pos in region:
+        for nb in neighbours(pos):
+            if (nb.x, nb.y) not in region_set and (nb.x, nb.y) not in bd:
+                bd.add((nb.x, nb.y))
+                yield nb
+
+
+def cell_is_empty(cell: Cell) -> bool:
+    return not cell.has_resource() and cell.citytile is None
+
+
+def cycle_num() -> int:
+    return game_state.turn // 40
+
+
+def cycle_turn() -> int:
+    return game_state.turn % 40
+
+
+def is_day():
+    return cycle_turn() < 30
+
+
+def is_night():
+    return cycle_turn() >= 30
+
+
+def turns_to_night():
+    return max(30 - cycle_turn(), 0)
+
+
+def survives_until(city: City) -> int:
+    nights_surv = math.floor(city.fuel / city.get_light_upkeep()) + max(cycle_turn() - 30, 0)
+    return 40 * (cycle_num() + nights_surv // 10) + 30 + nights_surv % 10
+
+
+class TurnState():
+
+    def __init__(self, observation):
+        self.player: Player = game_state.players[observation.player]
+        self.opponent: Player = game_state.players[(observation.player + 1) % 2]
+        self.width, self.height = game_state.map.width, game_state.map.height
+
+        self.actions = []  # Actions to perform
+        self.occupied = set()  # Cells occupied the next turn
+
+        self._analyse_resources()
+        self._analyse_resource_clusters()
+
+        self.cities: list[City] = list(self.player.cities.values())
+        self.citytiles: list[CityTile] = [c for city in self.cities for c in city.citytiles]
+
+        self.worker_vacancy = len(self.citytiles) - len(self.player.units)
+
+    def _analyse_resources(self):
+        self.wood_tiles = []
+        self.coal_tiles = []
+        self.uranium_tiles = []
+        for y in range(self.height):
+            for x in range(self.width):
+                cell = game_state.map.get_cell(x, y)
+                if cell.has_resource():
+                    if cell.resource.type == Constants.RESOURCE_TYPES.WOOD:
+                        self.wood_tiles.append(cell.pos)
+                    elif cell.resource.type == Constants.RESOURCE_TYPES.COAL:
+                        self.coal_tiles.append(cell.pos)
+                    elif cell.resource.type == Constants.RESOURCE_TYPES.URANIUM:
+                        self.uranium_tiles.append(cell.pos)
+
+    def _analyse_resource_clusters(self):
+        self.resource_cluster = []
+        visited = set()
+        for y in range(self.height):
+            for x in range(self.width):
+                cell = game_state.map.get_cell(x, y)
+                if self.cell_is_useful(cell) and (cell.pos.x, cell.pos.y) not in visited:
+                    visited.add((cell.pos.x, cell.pos.y))
+                    st = [cell.pos]
+                    ptr = 0
+                    while ptr < len(st):
+                        for nb in neighbours(st[ptr]):
+                            nb_cell = game_state.map.get_cell_by_pos(nb)
+                            if not (self.cell_is_useful(nb_cell) and (nb.x, nb.y) not in visited):
+                                continue
+                            visited.add((nb.x, nb.y))
+                            st.append(nb)
+                        ptr += 1
+
+                    self.resource_cluster.append(Cluster(st))
+
+    def move_avoid_collision(self, unit, direction):
+        arr = [DIRECTIONS.NORTH, DIRECTIONS.WEST, DIRECTIONS.SOUTH, DIRECTIONS.EAST, DIRECTIONS.CENTER]
+        random.shuffle(arr)
+
+        candidates = [direction] + arr
+        for candidate in candidates:
+            new_pos = unit.pos.translate(candidate, 1)
+            if not pos_is_valid(new_pos):
+                continue
+            if (new_pos.x, new_pos.y) in self.occupied:
+                continue
+            cell = game_state.map.get_cell_by_pos(new_pos)
+            if cell.citytile is not None:
+                if cell.citytile.team == self.player.team:
+                    return unit.move(candidate)
+                else:
+                    continue
+            self.occupied.add((new_pos.x, new_pos.y))
+            return unit.move(candidate)
+        log(f"Collision unavoidable for {unit.id}")
+        return unit.move(DIRECTIONS.CENTER)
+
+    def tile_score(self, pos: Position):
+        """Suitability of building at position"""
+        cell = game_state.map.get_cell_by_pos(pos)
+        if not cell_is_empty(cell):
+            return 0
+
+        nearest_cluster = []
+        cluster_dist = math.inf
+        for cluster in self.resource_cluster:
+            dist = pos.distance_to(cluster.centroid)
+            if dist < cluster_dist:
+                cluster_dist = dist
+                nearest_cluster = cluster.tiles
+
+        est_max = 0.0
+        citytile_num = 0
+        for tile in nearest_cluster:
+            cell = game_state.map.get_cell_by_pos(tile)
+            if cell.has_resource():
+                if cell.resource.type == Constants.RESOURCE_TYPES.WOOD:
+                    est_max += 0.5
+                elif cell.resource.type == Constants.RESOURCE_TYPES.COAL:
+                    if self.player.researched_coal():
+                        est_max += 2.0
+                elif cell.resource.type == Constants.RESOURCE_TYPES.URANIUM:
+                    if self.player.researched_uranium():
+                        est_max += 4.0
+            if self.cell_has_player_city(cell):
+                est_max -= 1.0
+
+        multiplier = 1.0
+        for tile in neighbours(pos):
+            cell = game_state.map.get_cell_by_pos(tile)
+            if cell.has_resource():
+                if cell.resource.type == Constants.RESOURCE_TYPES.WOOD:
+                    multiplier *= 1.1
+                elif cell.resource.type == Constants.RESOURCE_TYPES.COAL:
+                    if self.player.researched_coal():
+                        multiplier *= 1.5
+                elif cell.resource.type == Constants.RESOURCE_TYPES.URANIUM:
+                    if self.player.researched_uranium():
+                        multiplier *= 2.0
+        return est_max * multiplier
+
+    def cell_has_player_city(self, cell: Cell):
+        return cell.citytile is not None and cell.citytile.team == self.player.team
+
+    def cell_is_useful(self, cell: Cell):
+        return cell.has_resource() or self.cell_has_player_city(cell)
+
+    def neighbour_has_usable_resources(self, pos: Position) -> bool:
+        for nb in neighbours(pos):
+            cell = game_state.map.get_cell_by_pos(nb)
+            if not cell.has_resource():
+                continue
+            if cell.resource.type == Constants.RESOURCE_TYPES.WOOD:
+                return True
+            elif cell.resource.type == Constants.RESOURCE_TYPES.COAL:
+                if self.player.researched_coal():
+                    return True
+            elif cell.resource.type == Constants.RESOURCE_TYPES.URANIUM:
+                if self.player.researched_uranium():
+                    return True
+        return False
+
+    def city_adjacent_resources(self, city: City):
+        wood = 0
+        coal = 0
+        uranium = 0
+        for pos in boundary(map(lambda x: x.pos, city.citytiles)):
+            cell = game_state.map.get_cell_by_pos(pos)
+            if cell.has_resource():
+                if cell.resource.type == Constants.RESOURCE_TYPES.WOOD:
+                    wood += 1
+                elif cell.resource.type == Constants.RESOURCE_TYPES.COAL:
+                    coal += 1
+                elif cell.resource.type == Constants.RESOURCE_TYPES.URANIUM:
+                    uranium += 1
+        return (wood, coal, uranium)
+
+    def worker_reassign(self, worker: Unit, worker_state: UnitState):
+        """Reassign worker if necessary."""
+        if worker_state.goal == UnitGoal.BUILD:
+            # Set to IDLE if it is no longer possible to build at target
+            target_cell = game_state.map.get_cell_by_pos(worker_state.target)
+            if not cell_is_empty(target_cell):
+                worker_state.goal = UnitGoal.IDLE
+            elif worker.pos == target_cell.pos and worker.get_cargo_space_left() > 0 and not self.neighbour_has_usable_resources(worker.pos):
+                worker_state.goal = UnitGoal.IDLE
+        elif worker_state.goal == UnitGoal.GATHER:
+            if isinstance(worker_state.target, Position):
+                worker_state.target = self.player.cities[game_state.map.get_cell_by_pos(worker_state.target).citytile.cityid]
+            if worker_state.target not in self.player.cities:
+                worker_state.goal = UnitGoal.IDLE
+            elif worker.get_cargo_space_left() <= 5 or turns_to_night() <= 2:
+                worker_state.goal = UnitGoal.RETURN
+        elif worker_state.goal == UnitGoal.RETURN:
+            if worker_state.target not in self.player.cities:
+                worker_state.goal = UnitGoal.IDLE
+            elif turns_to_night() >= 2:
+                worker_cell = game_state.map.get_cell_by_pos(worker.pos)
+                if worker_cell.citytile is not None and survives_until(self.player.cities[worker_state.target]) >= min(360, game_state.turn + 60):
+                    worker_state.goal = UnitGoal.IDLE
+                elif worker.get_cargo_space_left() == 100:
+                    worker_state.goal = UnitGoal.GATHER
+
+    def worker_assign_idle(self, worker: Unit, worker_state: UnitState):
+        city_best = None
+        dist_best = math.inf
+        for city in self.cities:
+            if survives_until(city) >= min(360, game_state.turn + 60):
+                continue
+            dist = min(citytile.pos.distance_to(worker.pos) for citytile in city.citytiles)
+            if dist < dist_best:
+                dist_best = dist
+                city_best = city
+
+        if city_best is not None:
+            worker_state.goal = UnitGoal.GATHER if is_day() else UnitGoal.RETURN
+            worker_state.target = city.cityid
+            return
+
+        if turns_to_night() >= 5:
+            pos_best = None
+            pos_score = 0
+            for cluster in self.resource_cluster:
+                for pos in boundary(cluster.tiles):
+                    score = 0
+                    if 2 * pos.distance_to(worker.pos) <= turns_to_night():
+                        score = self.tile_score(pos) / (1 + max(0, pos.distance_to(worker.pos) - 2 * cycle_num()))
+                    if score > pos_score:
+                        pos_score = score
+                        pos_best = pos
+
+            if pos_best is not None:
+                worker_state.goal = UnitGoal.BUILD
+                worker_state.target = pos_best
+
+    def worker_perform_goal(self, worker: Unit, worker_state: UnitState) -> Optional[str]:
+        if worker_state.goal == UnitGoal.BUILD:
+            if worker.pos == worker_state.target:
+                if worker.can_build(game_state.map):
+                    worker_state.goal = UnitGoal.GATHER
+                    return worker.build_city()
+            else:
+                return self.move_avoid_collision(worker, worker.pos.direction_to(worker_state.target))
+        elif worker_state.goal == UnitGoal.GATHER:
+            resource_best = None
+            score_best = 0.0
+            for tile in self.wood_tiles:
+                score = 1.0 / (tile.distance_to(worker.pos) + 1)
+                if score > score_best:
+                    score_best = score
+                    resource_best = tile
+
+            if self.player.researched_coal():
+                for tile in self.coal_tiles:
+                    score = 1.0 / (tile.distance_to(worker.pos) + 1)
+                    if score > score_best:
+                        score_best = score
+                        resource_best = tile
+
+            if self.player.researched_uranium():
+                for tile in self.coal_tiles:
+                    score = 1.0 / (tile.distance_to(worker.pos) + 1)
+                    if score > score_best:
+                        score_best = score
+                        resource_best = tile
+
+            if resource_best is not None:
+                return self.move_avoid_collision(worker, worker.pos.direction_to(resource_best))
+
+        elif worker_state.goal == UnitGoal.RETURN:
+            city = self.player.cities[worker_state.target]
+            citytile = min(city.citytiles, key=lambda c: c.pos.distance_to(worker.pos))
+            return self.move_avoid_collision(worker, worker.pos.direction_to(citytile.pos))
+
+    def get_worker_action(self, worker: Unit, worker_state: UnitState) -> Optional[str]:
+        """Return a worker action, given that it can act."""
+
+        self.worker_reassign(worker, worker_state)
+
+        if worker_state.goal == UnitGoal.IDLE:
+            self.worker_assign_idle(worker, worker_state)
+
+        return self.worker_perform_goal(worker, worker_state)
+
+    def get_cart_action(self, cart: Unit, cart_state: UnitState) -> Optional[str]:
+        # Unimplemented
+        return None
+
+    def get_unit_action(self, unit: Unit) -> Optional[str]:
+        if unit.id not in unit_states:
+            unit_states[unit.id] = UnitState(unit.id)
+            log(f"New unit: {unit.id}")
+        if unit.can_act():
+            if unit.is_worker():
+                return self.get_worker_action(unit, unit_states[unit.id])
+            elif unit.is_cart():
+                return self.get_cart_action(unit, unit_states[unit.id])
+
+    def run_units(self):
+        available = []
+        for unit in self.player.units:
+            if unit.can_act():
+                available.append(unit)
+            else:
+                cell = game_state.map.get_cell_by_pos(unit.pos)
+                if cell.citytile is None:
+                    self.occupied.add((unit.pos.x, unit.pos.y))
+        for unit in available:
+            action = self.get_unit_action(unit)
+            if action is not None:
+                self.actions.append(action)
+
+    def get_citytile_action(self, citytile: CityTile, city: City) -> Optional[str]:
+        if self.worker_vacancy > 0:
+            if self.player.research_points < 50:
+                x = random.random()
+                if x < max(0.0, (len(self.citytiles) - 2) * 0.1):
+                    return citytile.research()
+                else:
+                    self.worker_vacancy -= 1
+                    return citytile.build_worker()
+            else:
+                self.worker_vacancy -= 1
+                return citytile.build_worker()
+        elif self.player.research_points < 50:
+            citytile.research()
+
+    def run_city(self, city: City):
+        for citytile in city.citytiles:
+            if not citytile.can_act():
+                continue
+            action = self.get_citytile_action(citytile, city)
+            if action is not None:
+                self.actions.append(action)
+
+    def run_cities(self):
+        for city in self.cities:
+            # log(f"City {city.cityid} survives until {survives_until(city)}")
+            self.run_city(city)
+
+    def run(self):
+        self.run_units()
+        self.run_cities()
+        return self.actions
+
+
 def agent(observation, configuration):
     global game_state
 
-    ### Do not edit ###
+    # Do not edit
     if observation["step"] == 0:
         game_state = Game()
         game_state._initialize(observation["updates"])
@@ -145,272 +451,5 @@ def agent(observation, configuration):
         game_state.id = observation.player
     else:
         game_state._update(observation["updates"])
-    
-    actions = []
 
-    ### AI Code goes down here! ### 
-    player = game_state.players[observation.player]
-    opponent = game_state.players[(observation.player + 1) % 2]
-    width, height = game_state.map.width, game_state.map.height
-
-    resource_tiles = find_resources(game_state)
-    
-    # Fuel only gets used up at night so we need enough to last the nights
-    
-    #Default= build new cities unless not enough fuel...
-    new_city = True
-    
-    #Keep track of turn no. and day night cycle.
-    turn= game_state.turn
-    
-    if turn%40 >30:
-        night= True
-        turns_to_night=0
-    else:
-        night=False
-        turns_to_night = 30- turn%40
-    
-    #Copy resource tiles 
-    resource_tiles_copy=resource_tiles.copy()
-    
-    #Keep a list of target locations
-    prev_loc=[unit.pos for unit in player.units]
-    
-    #Include not acting workers 
-    targets=[]
-    
-    for unit in player.units:
-        if unit.can_act()== False:
-            targets.append(unit.pos)
-    
-    #Keep track of player/ opponent city tiles
-    city_tiles=[]
-    
-    for city in player.cities:
-        
-        for tile in player.cities[city].citytiles:
-            city_tiles.append(tile.pos)
-    
-    opp_city_tiles=[]
-
-    for city in opponent.cities:
-        for tile in opponent.cities[city].citytiles:
-            opp_city_tiles.append(tile.pos)
-    
-    research_points=player.research_points
-    
-    #add targets to banned list
-    targets= targets + opp_city_tiles
-    
-    total_req_fuel=0
-    
-    total_city_fuel=0
-
-    #non-empty tiles
-    non_empty= resource_tiles + city_tiles + opp_city_tiles
-
-    for city in player.cities.values():
-        #Required fuel to build new city should be a function of no. turns to night and expected fuel gain during the day
-        
-        req_fuel = (10- turns_to_night*0.2)//1 * city.get_light_upkeep()
-        total_req_fuel+= req_fuel
-        
-        total_city_fuel+=city.fuel
-            
-        # Do stuff with our citytiles
-        for tile in city.citytiles:
-            if tile.can_act():
-                
-                # If we have fewer units than cities create a unit
-                if len(player.units) < sum([len(city.citytiles) for city in player.cities.values()]):
-                    action = tile.build_worker()
-                    actions.append(action)
-                
-                # Otherwise do research
-                elif research_points <200:
-                    action = tile.research()
-                    actions.append(action)
-                    research_points+=1
-                
-                #Else build worker or cart?
-                
-                else:
-                    action = tile.build_worker()
-                    actions.append(action)
-    
-    if total_req_fuel < total_city_fuel:
-        new_city==False
-    
-    for count, unit in enumerate(player.units):
-        # if the unit is a worker (can mine resources) and can perform an action this turn
-        if unit.is_worker() and unit.can_act():
-            
-            # Find the closest city tile and its distance from the unit
-            closest_city_tile = find_closest_city_tile(unit.pos, player)
-
-            if closest_city_tile is not None:
-                d = unit.pos.distance_to(closest_city_tile.pos)
-            else:
-                d=32
-            
-            late_game=330
-            
-            if (( 5 > turns_to_night and (turn < late_game or turn >350))  or night==True) and turn > 80  : 
-                
-                if closest_city_tile is not None:
-                #  If nearing night time, head to city
-                    action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
-                
-                    direction= unit.pos.direction_to(closest_city_tile.pos)
-                
-                    target= unit.pos.translate(direction,1)
-                
-                    targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
-                
-                else:
-                    action = unit.move('c')
-                    actions.append(action)
-
-                    targets.append(unit.pos) 
-
-                
-            #Special late game rules
-                
-            elif late_game < turn < 350 and unit.can_build(game_state.map) and d==1:
-                    
-                    action = unit.build_city()
-                    actions.append(action)                              
-                    targets.append(unit.pos)
-                    
-                    city_tiles.append(unit.pos)
-                                              
-
-            # Special early game rules
-            elif (2 < turn < 24 ) and turn % 3 != 0:
-                #build cities 
-                if unit.can_build(game_state.map):
-                    action = unit.build_city()
-                    actions.append(action)
-                    targets.append(unit.pos)
-                    
-                elif unit.pos not in city_tiles:
-                    direction= unit.pos.direction_to(closest_city_tile.pos)
-                    
-                    direction= inverse(direction)
-
-                    target= unit.pos.translate(direction,1)
-
-                    if target not in targets:
-                        action = unit.move(direction)
-                        actions.append(action)
-                        targets.append(target)
-
-                    else:
-                        continue
-            
-            # Prepare to cross long distances
-            elif (12< turn < 40) and unit.get_cargo_space_left() < 40 and count > 2:
-
-                dist= 0
-                while dist < 8:
-
-                    closest_resource_tile = find_closest_resources(tile.pos, player, resource_tiles_copy)
-
-                    dist= closest_resource_tile.pos.distance_to(tile.pos)
-
-                    i= resource_tiles_copy.index(closest_resource_tile)
-
-                    del resource_tiles_copy[i]
-
-                action = unit.move(unit.pos.direction_to(closest_resource_tile.pos))
-                    
-                direction= unit.pos.direction_to(closest_resource_tile.pos)
-
-                target= unit.pos.translate(direction,1)
-                
-                targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
-            
-            elif 5 > turns_to_night:
-
-                if closest_city_tile is not None:
-                    action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
-                
-                    direction= unit.pos.direction_to(closest_city_tile.pos)
-                    
-                    target= unit.pos.translate(direction,1)
-                
-                    targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
-                
-                else:
-                    action = unit.move('c')
-                    actions.append(action)
-
-                    targets.append(unit.pos)
-
-            
-            elif unit.can_build(game_state.map):
-                
-                if new_city ==True:
-                    action = unit.build_city()
-                    actions.append(action)
-                    targets.append(unit.pos)
-                    
-                else:
-                    continue
-            
-            # we want to mine only if there is space left in the worker's cargo
-            elif unit.get_cargo_space_left() > 0:
-                # find the closest resource if it exists to this unit
-                
-                closest_resource_tile = find_closest_resources(unit.pos, player, resource_tiles_copy)
-                
-                if closest_resource_tile is not None:
-                    
-                    i= resource_tiles_copy.index(closest_resource_tile)
-                    
-                    # create a move action to move this unit in the direction of the closest resource tile and add to our actions list
-                    action = unit.move(unit.pos.direction_to(closest_resource_tile.pos))
-                    
-                    #insert code to check if action will lead to collision... if so then say in center 
-                    direction= unit.pos.direction_to(closest_resource_tile.pos)
-                
-                    target= unit.pos.translate(direction,1)
-                
-                    targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
-                    
-                    del resource_tiles_copy[i]
-                    #Dont let agents have the same closest resource (dont compete and collide, hopefully)
-                
-                else:
-                    #no resource? go home
-
-                    if closest_city_tile is not None:
-
-                        action = unit.move(unit.pos.direction_to(closest_city_tile.pos)) 
-                
-                        direction= unit.pos.direction_to(closest_city_tile.pos)
-                
-                        target= unit.pos.translate(direction,1)
-                
-                        targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
-                    
-                    else:
-                        action = unit.move('c')
-                        actions.append(action)
-
-                        targets.append(unit.pos)
-
-
-            else:
-                # find the closest citytile and move the unit towards it to drop resources to a citytile to fuel the city
-                if closest_city_tile is not None:
-                    # create a move action to move this unit in the direction of the closest resource tile and add to our actions list
-                    action = unit.move(unit.pos.direction_to(closest_city_tile.pos))
-                    
-                    direction= unit.pos.direction_to(closest_city_tile.pos)
-                
-                    target= unit.pos.translate(direction,1)
-                
-                    targets, actions= collision_avoider(targets, target, actions, action, unit, city_tiles)
-                    
-    return actions
+    return TurnState(observation).run()
